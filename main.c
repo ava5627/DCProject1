@@ -359,6 +359,11 @@ int main(int argv, char* argc[]) {
             printf("Node %d finished round %d\n", node.neighbors[i], current_round);
         }
         printf("Finished round %d\n", current_round);
+        // add random delay between 1 and 5 seconds
+        // seed random number generator with current id
+        srand(node_id);
+        int delay = rand() % 5 + 1;
+        sleep(delay);
         current_round++;
     }
 

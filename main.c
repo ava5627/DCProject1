@@ -13,7 +13,11 @@
 #define SYNC_MSG "SYNC"
 #define STR_MSG "STRM"
 #define PELEG_MESSAGE "PLGM"
+#define ROLE_CALL_MESSAGE "ROLE"
+#define RESPONSE_MESSAGE "RESP"
 #define STOP_MESSAGE "STOP"
+#define YES_MESSAGE "YESM"
+#define NO_MESSAGE "NOMM"
 #define ACK_MESSAGE "ACKM"
 
 
@@ -40,8 +44,11 @@ int my_highest_uid_seen;
 int my_longest_distance_seen;
 int my_parent;
 int terminate = 0;
-int* closed_neighbors;
+int start_role_call = 0;
+int* stopped_neighbors;
+int* role_calls_responded;
 
+int* children;
 
 int node_from_id(int node_id, struct node* nodes, int num_nodes) {
     for (int i = 0; i < num_nodes; i++) {
@@ -82,12 +89,20 @@ void send_peleg_msg(int sock_fd, int uid_data, int distance_data) {
     send(sock_fd, msg, sizeof(msg), 0);
 }
 
+
+
 void send_stop_msg(int sock_fd) {
     send(sock_fd, STOP_MESSAGE, sizeof(STOP_MESSAGE), 0);
 }
 
-void send_ack_msg(int sock_fd) {
-    send(sock_fd, ACK_MESSAGE, sizeof(ACK_MESSAGE), 0);
+void send_role_msg(int sock_fd) {
+    send(sock_fd, ROLE_CALL_MESSAGE, sizeof(ROLE_CALL_MESSAGE), 0);
+}
+
+//response value of 0 means I'm not your kid, 1 means I AM your kid
+void send_response_msg(int sock_fd, char* response_value) {
+    send(sock_fd, RESPONSE_MESSAGE, sizeof(RESPONSE_MESSAGE), 0);
+    send(sock_fd, &response_value, sizeof(response_value), 0);
 }
 
 typedef struct listen_to_node_args {
@@ -248,6 +263,7 @@ int* start_connections(int node_id, struct node* nodes, int num_nodes){
     // connect to each neighbor with higher node id
     int index = node_from_id(node_id, nodes, num_nodes);
     struct node node = nodes[index];
+
 
     conds = (pthread_cond_t*) malloc(sizeof(pthread_cond_t) * node.num_neighbors);
     neighbor_round = (int*) malloc(sizeof(int) * node.num_neighbors);

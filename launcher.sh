@@ -1,10 +1,12 @@
 #!/bin/bash
 
 # Change this to your netid
-netid=ash170000
+#netid=ash170000
+netid=rdc180001
 
 # Root directory of your project
-PROJECT_DIR=$HOME/DistributedComputing/Project1
+#PROJECT_DIR=$HOME/DistributedComputing/Project1
+PROJECT_DIR=/home/013/r/rd/rdc180001/DCProject1
 
 # Directory where the config file is located on your local system
 CONFIG_LOCAL=$PROJECT_DIR/config.txt

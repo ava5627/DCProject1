@@ -1,4 +1,4 @@
-CONFIG_LOCAL=./config_triangle.txt
+CONFIG_LOCAL=./config.txt
 BINARY_DIR=./cmake-build-debug
 PROGRAM=Project1
 

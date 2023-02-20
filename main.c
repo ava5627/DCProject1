@@ -12,6 +12,9 @@
 
 #define SYNC_MSG "SYNC"
 #define STR_MSG "STRM"
+#define PELEG_MESSAGE "PLGM"
+#define STOP_MESSAGE "STOP"
+#define ACK_MESSAGE "ACKM"
 
 
 struct node {
@@ -22,10 +25,23 @@ struct node {
     int num_neighbors;
 };
 
+struct peleg_msg {
+    int highest_uid_seen;
+    int longest_distance_seen;
+};
+
 pthread_mutex_t mutex;
 pthread_cond_t* conds;
+
 int* neighbor_round;
 int current_round;
+
+int my_highest_uid_seen;
+int my_longest_distance_seen;
+int my_parent;
+int terminate = 0;
+int* closed_neighbors;
+
 
 int node_from_id(int node_id, struct node* nodes, int num_nodes) {
     for (int i = 0; i < num_nodes; i++) {
@@ -52,11 +68,34 @@ void send_str_msg(int sock_fd, char* msg) {
     send(sock_fd, msg, msg_len, 0);
 }
 
+struct peleg_msg* rcv_peleg_msg(int sock_fd) {
+    struct peleg_msg* msg = (struct peleg_msg*) malloc(sizeof(struct peleg_msg));
+    recv(sock_fd, msg, sizeof(struct peleg_msg), 0);
+    return msg;
+}
+
+void send_peleg_msg(int sock_fd, int uid_data, int distance_data) {
+    send(sock_fd, PELEG_MESSAGE, 4, 0);
+    struct peleg_msg* msg = (struct peleg_msg*) malloc(sizeof(struct peleg_msg));
+    msg->highest_uid_seen = uid_data;
+    msg->longest_distance_seen = distance_data;
+    send(sock_fd, msg, sizeof(msg), 0);
+}
+
+void send_stop_msg(int sock_fd) {
+    send(sock_fd, STOP_MESSAGE, sizeof(STOP_MESSAGE), 0);
+}
+
+void send_ack_msg(int sock_fd) {
+    send(sock_fd, ACK_MESSAGE, sizeof(ACK_MESSAGE), 0);
+}
+
 typedef struct listen_to_node_args {
     int sock_fd;
     int other_node_id;
     int other_node_index;
 } listen_to_node_args;
+
 void *listen_to_node(void *args) {
     listen_to_node_args *f_args = (listen_to_node_args*) args;
     int sock_fd = f_args->sock_fd;
@@ -82,8 +121,33 @@ void *listen_to_node(void *args) {
             char* msg = rcv_str_msg(sock_fd);
             printf("Received { %s } from node %d\n", msg, other_node_id);
             free(msg);
+        } else if (strcmp(type, PELEG_MESSAGE) == 0) {
+            struct peleg_msg* msg = rcv_peleg_msg(sock_fd);
+            pthread_mutex_lock(&mutex);
+            if (msg->highest_uid_seen > my_highest_uid_seen) {
+                my_highest_uid_seen = msg->highest_uid_seen;
+                my_longest_distance_seen = msg->longest_distance_seen + 1;
+                my_parent = other_node_id;
+            }
+            else if(msg->highest_uid_seen < my_highest_uid_seen) {
+                // don't relay info unless
+            }
+            else if(msg->highest_uid_seen == my_highest_uid_seen) {
+                // set distance to max of msg distance and my distance
+                my_longest_distance_seen = (msg->longest_distance_seen > my_longest_distance_seen) ? msg->longest_distance_seen : my_longest_distance_seen;
+            }
+            pthread_mutex_unlock(&mutex);
+
+            //printf("Received PELEG from node %d, highest_uid_seen: %d, longest_distance_seen: %d\n", other_node_id, msg->highest_uid_seen, msg->longest_distance_seen);
+            free(msg);
+        } else if (strcmp(type, STOP_MESSAGE) == 0) {
+            printf("Received STOP from node %d\n", other_node_id);
+            pthread_mutex_lock(&mutex);
+            terminate = 1;
+            closed_neighbors[other_node_index] = 1;
+            pthread_mutex_unlock(&mutex);
         } else {
-            printf("Received unknown message type from node %d: %d\n", other_node_id, type);
+//            printf("Received unknown message type from node %d: %s\n", other_node_id, type);
         }
     }
     return NULL;
@@ -248,6 +312,7 @@ int main(int argv, char* argc[]) {
     // ignore characters after # on a line
     // ingore empty lines
     int num_nodes = 0;
+
     while (getline(&line, &len, fp)) {
         if (!isdigit(line[0])) {
             continue;
@@ -341,12 +406,27 @@ int main(int argv, char* argc[]) {
 
 //    count_to_five();
 
-    while (current_round < 5) {
+    int rounds_since_update = 0;
+
+    my_highest_uid_seen = node.node_id;
+    my_longest_distance_seen = 0;
+    my_parent = node.node_id;
+
+    int last_distance_seen = 0;
+
+
+    // the main loop
+    while (1) {
+
+        last_distance_seen = my_longest_distance_seen;
+
         for (int i = 0; i < node.num_neighbors; i++) {
             send(neighbor_fds[i], SYNC_MSG, 4, 0);
             send(neighbor_fds[i], &current_round, 4, 0);
-            printf("Sent sync message to node %d for round %d\n", node.neighbors[i], current_round);
-        }
+//            printf("Sent sync message to node %d for round %d\n", node.neighbors[i], current_round);
+//            printf("I am node %d, sending peleg message header+data to node %d\n", node.node_id, node.neighbors[i]);
+            send_peleg_msg(neighbor_fds[i], my_highest_uid_seen, my_longest_distance_seen);
+        };
         for (int i = 0; i < node.num_neighbors; i++) {
             struct node neighbor = nodes[node_from_id(node.neighbors[i], nodes, num_nodes)];
             // wait until neighbor round >= current round
@@ -358,12 +438,33 @@ int main(int argv, char* argc[]) {
             pthread_mutex_unlock(&mutex);
             printf("Node %d finished round %d\n", node.neighbors[i], current_round);
         }
-        printf("Finished round %d\n", current_round);
-        // add random delay between 1 and 5 seconds
-        // seed random number generator with current id
-        srand(node_id);
-        int delay = rand() % 5 + 1;
-        sleep(delay);
+
+        if(last_distance_seen != my_longest_distance_seen) {
+            rounds_since_update = 0;
+        } else {
+            rounds_since_update++;
+        }
+
+        if (rounds_since_update == 3) {
+            for (int i = 0; i < node.num_neighbors; i++) {
+                send_stop_msg(neighbor_fds[i]);
+                terminate = 1;
+            }
+        }
+
+//        printf("Num ACK = %d\n", num_ack);
+//        if (num_ack == node.num_neighbors){
+//            printf("TERMINATING Num ACK = %d / %d", num_ack, node.num_neighbors);
+//            terminate = 1;
+//            break;
+//        }
+        if (terminate == 1){
+            printf("TERMINATE\n");
+            break;
+        }
+
+        printf("Finished round %d, rounds_since_update is %d\n", current_round, rounds_since_update);
+        printf("My highest uid seen is %d, distance is %d\n", my_highest_uid_seen, my_longest_distance_seen);
         current_round++;
     }
 
@@ -375,6 +476,3 @@ int main(int argv, char* argc[]) {
     free(neighbor_fds);
 
 }
-
-
-

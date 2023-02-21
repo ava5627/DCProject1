@@ -119,10 +119,23 @@ void *listen_to_node(void *args) {
 
     while (1) {
         char type[4] = {0};
+        if (terminate == 1) {
+            printf("WAKING UP DUE TO NODE %d DISCONNECT\n", other_node_id);
+            stopped_neighbors[other_node_index] = 1;
+            pthread_mutex_lock(&mutex);
+            pthread_cond_signal(&conds[other_node_index]);
+            pthread_mutex_unlock(&mutex);
+            close(sock_fd);
+            break;
+        }
+
+
         ssize_t valread = recv(sock_fd, &type, 4, 0);
         if (valread == 0) {
             printf("Node %d disconnected\n", other_node_id);
-            break;
+            terminate = 1;
+            stopped_neighbors[other_node_index] = 1;
+            continue;
         }
         if (strcmp(type, SYNC_MSG) == 0) {
             int round;
@@ -158,9 +171,38 @@ void *listen_to_node(void *args) {
         } else if (strcmp(type, STOP_MESSAGE) == 0) {
             printf("Received STOP from node %d\n", other_node_id);
             pthread_mutex_lock(&mutex);
-            terminate = 1;
-            closed_neighbors[other_node_index] = 1;
+            stopped_neighbors[other_node_index] = 1;
             pthread_mutex_unlock(&mutex);
+        } else if (strcmp(type, ROLE_CALL_MESSAGE) == 0){
+            printf("Recieved ROLE from node %d\n", other_node_id);
+            role_calls_responded[other_node_index] = 1;
+            if (my_parent == other_node_id) {
+                printf("This is my parent\n");
+                send_response_msg(sock_fd, YES_MESSAGE);
+            } else {
+                printf("This is not my parent\n");
+                send_response_msg(sock_fd, NO_MESSAGE);
+            }
+            if (children[other_node_index] != 3) {
+                start_role_call = 1;
+            }
+        } else if (strcmp(type, RESPONSE_MESSAGE) == 0){
+            char* response;
+            ssize_t resp_size = recv(sock_fd, &response, 4, 0);
+            if (resp_size == 0) {
+                printf("Node disconnected without sending response????\n");
+                continue;
+            }
+            printf("Got a role call response from node %d of %s, size %zd\n", other_node_id, response, resp_size);
+            if (strcmp(response, YES_MESSAGE) == 0) {
+                printf("This is my child\n");
+                children[other_node_index] = 1;
+            } else if (strcmp(response, NO_MESSAGE) == 0) {
+                printf("This is not my child\n");
+                children[other_node_index] = 0;
+            } else {
+                printf("The world is dead\n");
+            }
         } else {
 //            printf("Received unknown message type from node %d: %s\n", other_node_id, type);
         }
@@ -196,9 +238,11 @@ int* accept_nodes(struct node this_node) {
         exit(1);
     }
     int* neighbor_fds = (int*) malloc(sizeof(int) * this_node.num_neighbors);
+    //int n = 0;
     for (int i = 0; i < this_node.num_neighbors; i++) {
         if (this_node.neighbors[i] < this_node.node_id) {
             neighbor_fds[i] = -1;
+            //printf("SKIP\n");
             continue;
         }
         int client_fd = accept(server_fd, NULL, NULL);
@@ -207,6 +251,8 @@ int* accept_nodes(struct node this_node) {
             exit(1);
         }
         int recv_node_id;
+        //n++;
+        //printf("Waiting for connection %d\n", n);
         recv(client_fd, &recv_node_id, sizeof(int), 0);
         for (int j = 0; j < this_node.num_neighbors; j++) {
             if (this_node.neighbors[j] == recv_node_id) {
@@ -267,8 +313,15 @@ int* start_connections(int node_id, struct node* nodes, int num_nodes){
 
     conds = (pthread_cond_t*) malloc(sizeof(pthread_cond_t) * node.num_neighbors);
     neighbor_round = (int*) malloc(sizeof(int) * node.num_neighbors);
+    stopped_neighbors = (int*) malloc(sizeof(int) * node.num_neighbors);
+    children = (int*) malloc(sizeof(int) * node.num_neighbors);
+    role_calls_responded = (int*) malloc(sizeof(int) * node.num_neighbors);
+
     for (int i = 0; i < node.num_neighbors; i++) {
         neighbor_round[i] = -1;
+        children[i] = 3;
+        role_calls_responded[i] = 0;
+        stopped_neighbors[i] = 0;
         pthread_cond_init(&conds[i], NULL);
     }
     // accept connections from this node
@@ -443,16 +496,28 @@ int main(int argv, char* argc[]) {
 //            printf("I am node %d, sending peleg message header+data to node %d\n", node.node_id, node.neighbors[i]);
             send_peleg_msg(neighbor_fds[i], my_highest_uid_seen, my_longest_distance_seen);
         };
+        int neighbors_finished = 0;
+        int num_stopped = 0;
+        int neighbors_responded = 0;
         for (int i = 0; i < node.num_neighbors; i++) {
             struct node neighbor = nodes[node_from_id(node.neighbors[i], nodes, num_nodes)];
             // wait until neighbor round >= current round
             pthread_mutex_lock(&mutex);
-            if (neighbor_round[i] < current_round) {
-                printf("Waiting for node %d to finish round %d\n", node.neighbors[i], current_round);
+            if (neighbor_round[i] < current_round && !stopped_neighbors[i] ) {
+                printf("Waiting for node %d to finish round %d, currently they are on %d\n", node.neighbors[i], current_round, neighbor_round[i]);
                 pthread_cond_wait(&conds[i], &mutex);
+                printf("Waking up from waiting for node %d\n", node.neighbors[i]);
             }
             pthread_mutex_unlock(&mutex);
-            printf("Node %d finished round %d\n", node.neighbors[i], current_round);
+            if (children[i] != 3) {
+                neighbors_finished++;
+            }
+            if (role_calls_responded[i] == 1){
+                neighbors_responded++;
+            }
+            if (stopped_neighbors[i] == 1){
+                num_stopped++;
+            }
         }
 
         if(last_distance_seen != my_longest_distance_seen) {
@@ -461,11 +526,29 @@ int main(int argv, char* argc[]) {
             rounds_since_update++;
         }
 
-        if (rounds_since_update == 3) {
+
+        if (rounds_since_update == 3 && my_highest_uid_seen == node.node_id) {
+            start_role_call = 1;
+        }
+        if (start_role_call == 1){
             for (int i = 0; i < node.num_neighbors; i++) {
-                send_stop_msg(neighbor_fds[i]);
-                terminate = 1;
+                if (children[i] != 3 || node.neighbors[i] == my_parent){
+                    continue;
+                }
+                send_role_msg(neighbor_fds[i]);
             }
+            start_role_call = 0;
+        }
+
+
+        if (neighbors_finished == node.num_neighbors && neighbors_responded == node.num_neighbors){
+            for (int i = 0; i < node.num_neighbors; ++i) {
+                send_stop_msg(neighbor_fds[i]);
+            }
+        }
+
+        if (num_stopped == node.num_neighbors){
+            terminate = 1;
         }
 
 //        printf("Num ACK = %d\n", num_ack);
@@ -474,7 +557,7 @@ int main(int argv, char* argc[]) {
 //            terminate = 1;
 //            break;
 //        }
-        if (terminate == 1){
+        if (terminate == 1) {
             printf("TERMINATE\n");
             break;
         }
@@ -483,6 +566,15 @@ int main(int argv, char* argc[]) {
         printf("My highest uid seen is %d, distance is %d\n", my_highest_uid_seen, my_longest_distance_seen);
         current_round++;
     }
+    printf("The leader id %d\n", my_highest_uid_seen);
+    printf("I am %d, my parent is %d\n", node.node_id, my_parent);
+    printf("Children: ");
+    for (int i = 0; i < node.num_neighbors; ++i) {
+//        if (children[i] == 1){
+            printf("(%d, %d) ", node.neighbors[i], children[i]);
+//        }
+    }
+    fflush(stdout);
 
     for (int i = 0; i < num_nodes; i++) {
         free(nodes[i].neighbors);

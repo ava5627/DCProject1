@@ -36,7 +36,7 @@ pthread_mutex_t mutex;
 pthread_cond_t* conds;
 
 int* neighbor_round;
-int current_round;
+int current_round = 0;
 
 int my_highest_uid_seen;
 int my_longest_distance_seen;
@@ -46,6 +46,7 @@ int leader_elected = 0;
 int need_to_send_agree_elected = 0;
 int already_sent_agree_elected = 0;
 int already_asked_for_children = 0;
+int already_sent_stop = 0;
 int* neighbors_sent_stop;
 int* neighbors_agree_elected;
 
@@ -70,10 +71,12 @@ char* rcv_str_msg(int sock_fd) {
 }
 
 void send_str_msg(int sock_fd, char* msg) {
+    pthread_mutex_lock(&mutex);
     int msg_len = strlen(msg);
     send(sock_fd, STR_MSG, 4, 0);
     send(sock_fd, &msg_len, sizeof(int), 0);
     send(sock_fd, msg, msg_len, 0);
+    pthread_mutex_unlock(&mutex);
 }
 
 struct peleg_msg* rcv_peleg_msg(int sock_fd) {
@@ -83,36 +86,38 @@ struct peleg_msg* rcv_peleg_msg(int sock_fd) {
 }
 
 void send_peleg_msg(int sock_fd, int uid_data, int distance_data) {
+    pthread_mutex_lock(&mutex);
     send(sock_fd, PELEG_MESSAGE, 4, 0);
     struct peleg_msg* msg = (struct peleg_msg*) malloc(sizeof(struct peleg_msg));
     msg->highest_uid_seen = uid_data;
     msg->longest_distance_seen = distance_data;
     send(sock_fd, msg, sizeof(msg), 0);
+    pthread_mutex_unlock(&mutex);
 }
 
 void send_stop_msg(int sock_fd) {
-    printf("Sending stop message to fd %d\n", sock_fd);
+//    printf("Sending stop message to fd %d\n", sock_fd);
     send_str_msg(sock_fd, STOP_MESSAGE);
 }
 
 void send_agree_elected_msg(int sock_fd) {
-    printf("Sending agree elected message to fd %d\n", sock_fd);
+//    printf("Sending agree elected message to fd %d\n", sock_fd);
     send_str_msg(sock_fd, LEADER_ELECTED_MESSAGE);
 
 }
 
 void send_ask_if_child_msg(int sock_fd) {
-    printf("Sending ask if child message to fd %d\n", sock_fd);
+//    printf("Sending ask if child message to fd %d\n", sock_fd);
     send_str_msg(sock_fd, ASK_IF_CHILD_MESSAGE);
 }
 
 void send_i_am_your_kid_msg(int sock_fd) {
-    printf("Sending I am your kid message to fd %d\n", sock_fd);
+//    printf("Sending I am your kid message to fd %d\n", sock_fd);
     send_str_msg(sock_fd, I_AM_YOUR_KID_MESSAGE);
 }
 
 void send_i_am_not_your_kid_msg(int sock_fd) {
-    printf("Sending I am not your kid message to fd %d\n", sock_fd);
+//    printf("Sending I am not your kid message to fd %d\n", sock_fd);
     send_str_msg(sock_fd, I_AM_NOT_YOUR_KID_MESSAGE);
 }
 
@@ -203,7 +208,9 @@ void *listen_to_node(void *args) {
         } else if (strcmp(type, PELEG_MESSAGE) == 0) {
             struct peleg_msg* msg = rcv_peleg_msg(sock_fd);
             pthread_mutex_lock(&mutex);
+            printf("Got a Peleg Message with their high (UID, d) = (%d, %d)\n", msg->highest_uid_seen, msg->longest_distance_seen);
             if (msg->highest_uid_seen > my_highest_uid_seen) {
+                printf("Setting my parent to %d because their high uid beats mine of %d\n", other_node_id, my_highest_uid_seen);
                 my_highest_uid_seen = msg->highest_uid_seen;
                 my_longest_distance_seen = msg->longest_distance_seen + 1;
                 my_parent = other_node_id;
@@ -483,15 +490,14 @@ int main(int argv, char* argc[]) {
         }
     }
 
-    int* neighbor_fds = start_connections(node_id, nodes, num_nodes);
     struct node node = nodes[node_from_id(node_id, nodes, num_nodes)];
-
-    int rounds_since_update = 0;
-
     my_highest_uid_seen = node.node_id;
     my_longest_distance_seen = 0;
     my_parent = node.node_id;
 
+    int* neighbor_fds = start_connections(node_id, nodes, num_nodes);
+
+    int rounds_since_update = 0;
     int last_distance_seen = 0;
 
 
@@ -503,7 +509,6 @@ int main(int argv, char* argc[]) {
         for (int i = 0; i < node.num_neighbors; i++) {
             send(neighbor_fds[i], SYNC_MSG, 4, 0);
             send(neighbor_fds[i], &current_round, 4, 0);
-            send_peleg_msg(neighbor_fds[i], my_highest_uid_seen, my_longest_distance_seen);
         }
         int num_stopped = 0;
         int num_agree_elected = 0;
@@ -528,7 +533,7 @@ int main(int argv, char* argc[]) {
             if(neighbors_agree_elected[i] == 1) {
                 num_agree_elected++;
             }
-
+            send_peleg_msg(neighbor_fds[i], my_highest_uid_seen, my_longest_distance_seen);
         }
 
         // keep track of the updates of d
@@ -585,9 +590,13 @@ int main(int argv, char* argc[]) {
 
             // if at some round, every neighbor has finally responded, we can say we want to stop
             if(num_neighbors_responded_to_family == node.num_neighbors) {
-                //send stop to all neighbors
-                for (int i = 0; i < node.num_neighbors; ++i) {
-                    send_stop_msg(neighbor_fds[i]);
+
+                if(already_sent_stop == 0) {
+                    //send stop to all neighbors
+                    for (int i = 0; i < node.num_neighbors; ++i) {
+                        send_stop_msg(neighbor_fds[i]);
+                    }
+                    already_sent_stop = 1;
                 }
 
                 // if a leader has been elected, we said we wanted to stop, and everyone else also wants to stop
@@ -610,7 +619,7 @@ int main(int argv, char* argc[]) {
         printf("My highest uid seen is %d, distance is %d\n", my_highest_uid_seen, my_longest_distance_seen);
         current_round++;
         // sleep for a random integer between 1 and 5 seconds to show synchronization
-        // sleep(rand() % 5 + 1);
+         sleep(rand() % 3 + 0.2);
     }
 
     printf("The leader id %d\n", my_highest_uid_seen);
@@ -623,9 +632,9 @@ int main(int argv, char* argc[]) {
             degree += 1;
         }
     }
-    printf("\nDegree: %d", degree);
-    fflush(stdout);
+    printf("\nDegree: %d\n", degree);
 
+    fflush(stdout);
     for (int i = 0; i < num_nodes; i++) {
         free(nodes[i].neighbors);
         free(nodes[i].ip_address);

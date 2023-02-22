@@ -2,8 +2,6 @@ CONFIG_LOCAL=./config_local.txt
 BINARY_DIR=./cmake-build-debug
 PROGRAM=Project1
 
-ls
-
 cat $CONFIG_LOCAL | sed -e "s/#.*//" | sed -e "/^\s*$/d" |
 (
   read i

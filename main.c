@@ -28,6 +28,7 @@ struct node {
 struct peleg_msg {
     int highest_uid_seen;
     int longest_distance_seen;
+    int my_distance;
 };
 
 pthread_mutex_t mutex;
@@ -39,6 +40,7 @@ int current_round;
 
 int my_highest_uid_seen;
 int my_longest_distance_seen;
+int my_distance;
 int my_parent;
 int terminate = 0;
 
@@ -74,12 +76,13 @@ struct peleg_msg* rcv_peleg_msg(int sock_fd) {
     return msg;
 }
 
-void send_peleg_msg(int sock_fd, int uid_data, int distance_data) {
+void send_peleg_msg(int sock_fd, int uid_data, int distance_data, int my_distance_data) {
     send(sock_fd, PELEG_MESSAGE, sizeof(PELEG_MESSAGE), 0);
     struct peleg_msg* msg = (struct peleg_msg*) malloc(sizeof(struct peleg_msg));
     msg->highest_uid_seen = uid_data;
     msg->longest_distance_seen = distance_data;
-    send(sock_fd, msg, sizeof(msg), 0);
+    msg->my_distance = my_distance_data;
+    send(sock_fd, msg, sizeof(struct peleg_msg), 0);
 }
 
 void send_stop_msg(int sock_fd) {
@@ -139,7 +142,12 @@ void *listen_to_node(void *args) {
             pthread_mutex_lock(&mutex);
             if (msg->highest_uid_seen > my_highest_uid_seen) {
                 my_highest_uid_seen = msg->highest_uid_seen;
-                my_longest_distance_seen = msg->longest_distance_seen + 1;
+                my_distance = msg->my_distance + 1;
+                if (my_distance > msg->longest_distance_seen) {
+                    my_longest_distance_seen = my_distance;
+                } else {
+                    my_longest_distance_seen = msg->longest_distance_seen;
+                }
                 my_parent = other_node_id;
             }
             else if(msg->highest_uid_seen < my_highest_uid_seen) {
@@ -147,6 +155,10 @@ void *listen_to_node(void *args) {
             }
             else if(msg->highest_uid_seen == my_highest_uid_seen) {
                 // set distance to max of msg distance and my distance
+                if (msg->my_distance + 1 < my_distance) {
+                    my_distance = msg->my_distance + 1;
+                    my_parent = other_node_id;
+                }
                 my_longest_distance_seen = (msg->longest_distance_seen > my_longest_distance_seen) ? msg->longest_distance_seen : my_longest_distance_seen;
             }
             pthread_mutex_unlock(&mutex);
@@ -431,6 +443,7 @@ int main(int argv, char* argc[]) {
 
     my_highest_uid_seen = node.node_id;
     my_longest_distance_seen = 0;
+    my_distance = 0;
     my_parent = node.node_id;
 
     int last_distance_seen = 0;
@@ -443,8 +456,8 @@ int main(int argv, char* argc[]) {
         for (int i = 0; i < node.num_neighbors; i++) {
             send(neighbor_fds[i], SYNC_MSG, sizeof(SYNC_MSG), 0);
             send(neighbor_fds[i], &current_round, sizeof(int), 0);
-            send_peleg_msg(neighbor_fds[i], my_highest_uid_seen, my_longest_distance_seen);
-        };
+            send_peleg_msg(neighbor_fds[i], my_highest_uid_seen, my_longest_distance_seen, my_distance);
+        }
         int neighbors_finished = 0;
         int neighbors_responded = 0;
         for (int i = 0; i < node.num_neighbors; i++) {

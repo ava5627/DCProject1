@@ -1,4 +1,4 @@
-CONFIG_LOCAL=./config.txt
+CONFIG_LOCAL=./config_localhost.txt
 BINARY_DIR=./cmake-build-debug
 PROGRAM=Project1
 

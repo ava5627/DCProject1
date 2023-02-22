@@ -13,11 +13,15 @@
 #define SYNC_MSG "SYNC"
 #define STR_MSG "STRM"
 #define PELEG_MESSAGE "PLGM"
-#define ROLE_CALL_MESSAGE "ROLE"
-#define RESPONSE_MESSAGE "RESP"
+//#define ROLE_CALL_MESSAGE "ROLE"
+//#define RESPONSE_MESSAGE "RESP"
+#define LEADER_ELECTED_MESSAGE "LEAD"
 #define STOP_MESSAGE "STOP"
-#define YES_MESSAGE "YESM"
-#define NO_MESSAGE "NOMM"
+#define ASK_IF_CHILD_MESSAGE "MINE"
+#define I_AM_YOUR_KID_MESSAGE "MAMA"
+#define I_AM_NOT_YOUR_KID_MESSAGE "WHOU"
+#define DONE_FINDING_FAMILY_MESSAGE "DONE"
+
 #define ACK_MESSAGE "ACKM"
 
 
@@ -44,9 +48,17 @@ int my_highest_uid_seen;
 int my_longest_distance_seen;
 int my_parent;
 int terminate = 0;
-int start_role_call = 0;
-int* stopped_neighbors;
-int* role_calls_responded;
+int leader_elected = 0;
+int need_to_send_agree_elected = 0;
+int already_sent_agree_elected = 0;
+int need_to_send_stop = 0;
+int already_sent_stop = 0;
+int already_asked_for_children = 0;
+//int start_role_call = 0;
+int* neighbors_sent_stop;
+int* neighbors_agree_elected;
+int* neighbors_done_finding_kids;
+//int* role_calls_responded;
 
 int* children;
 
@@ -89,21 +101,53 @@ void send_peleg_msg(int sock_fd, int uid_data, int distance_data) {
     send(sock_fd, msg, sizeof(msg), 0);
 }
 
-
-
 void send_stop_msg(int sock_fd) {
-    send(sock_fd, STOP_MESSAGE, sizeof(STOP_MESSAGE), 0);
+    printf("Sending stop message to fd %d\n", sock_fd);
+//    send(sock_fd, STOP_MESSAGE, sizeof(STOP_MESSAGE), 0);
+    send_str_msg(sock_fd, STOP_MESSAGE);
 }
 
-void send_role_msg(int sock_fd) {
-    send(sock_fd, ROLE_CALL_MESSAGE, sizeof(ROLE_CALL_MESSAGE), 0);
+void send_agree_elected_msg(int sock_fd) {
+    printf("Sending agree elected message to fd %d\n", sock_fd);
+//    send(sock_fd, LEADER_ELECTED_MESSAGE, sizeof(LEADER_ELECTED_MESSAGE), 0);
+    send_str_msg(sock_fd, LEADER_ELECTED_MESSAGE);
+
 }
 
-//response value of 0 means I'm not your kid, 1 means I AM your kid
-void send_response_msg(int sock_fd, char* response_value) {
-    send(sock_fd, RESPONSE_MESSAGE, sizeof(RESPONSE_MESSAGE), 0);
-    send(sock_fd, &response_value, sizeof(response_value), 0);
+void send_ask_if_child_msg(int sock_fd) {
+    printf("Sending ask if child message to fd %d\n", sock_fd);
+//    send(sock_fd, ASK_IF_CHILD_MESSAGE, sizeof(ASK_IF_CHILD_MESSAGE), 0);
+    send_str_msg(sock_fd, ASK_IF_CHILD_MESSAGE);
 }
+
+void send_i_am_your_kid_msg(int sock_fd) {
+    printf("Sending I am your kid message to fd %d\n", sock_fd);
+//    send(sock_fd, I_AM_YOUR_KID_MESSAGE, sizeof(I_AM_YOUR_KID_MESSAGE), 0);
+    send_str_msg(sock_fd, I_AM_YOUR_KID_MESSAGE);
+}
+
+void send_i_am_not_your_kid_msg(int sock_fd) {
+    printf("Sending I am not your kid message to fd %d\n", sock_fd);
+//    send(sock_fd, I_AM_NOT_YOUR_KID_MESSAGE, sizeof(I_AM_NOT_YOUR_KID_MESSAGE), 0);
+    send_str_msg(sock_fd, I_AM_NOT_YOUR_KID_MESSAGE);
+}
+
+
+void send_done_finding_kids_msg(int sock_fd) {
+    printf("Sending done finding kids message to fd %d\n", sock_fd);
+//    send(sock_fd, DONE_FINDING_FAMILY_MESSAGE, sizeof(DONE_FINDING_FAMILY_MESSAGE), 0);
+    send_str_msg(sock_fd, DONE_FINDING_FAMILY_MESSAGE);
+}
+
+//void send_role_msg(int sock_fd) {
+//    send(sock_fd, ROLE_CALL_MESSAGE, sizeof(ROLE_CALL_MESSAGE), 0);
+//}
+//
+////response value of 0 means I'm not your kid, 1 means I AM your kid
+//void send_response_msg(int sock_fd, char* response_value) {
+//    send(sock_fd, RESPONSE_MESSAGE, sizeof(RESPONSE_MESSAGE), 0);
+//    send(sock_fd, &response_value, sizeof(response_value), 0);
+//}
 
 typedef struct listen_to_node_args {
     int sock_fd;
@@ -111,6 +155,53 @@ typedef struct listen_to_node_args {
     int other_node_index;
 } listen_to_node_args;
 
+void handle_str_msg(char* msg, int sock_fd, int other_node_id, int other_node_index) {
+//    printf("The msg is %s, the strcmp between it and LEADERELECTEDMESG is %d\n", msg, strncmp(msg, LEADER_ELECTED_MESSAGE, 4));
+    if (strncmp(msg, LEADER_ELECTED_MESSAGE, 4) == 0) {
+        printf("Received LEADER_ELECTED from node %d\n", other_node_id);
+        //send agree elected to all neighbors, but ignore sending it again if they already told you?
+        //            if(neighbors_agree_elected[other_node_index] == 1) {
+        //                continue;
+        //            }
+        if(already_sent_agree_elected != 1) {
+            pthread_mutex_lock(&mutex);
+            need_to_send_agree_elected = 1;
+            pthread_mutex_unlock((&mutex));
+        }
+        pthread_mutex_lock(&mutex);
+        neighbors_agree_elected[other_node_index] = 1;
+        pthread_mutex_unlock(&mutex);
+    } else if (strncmp(msg, STOP_MESSAGE, 4) == 0) {
+        printf("Received STOP from node %d\n", other_node_id);
+//        if(already_sent_stop != 1) {
+//            pthread_mutex_lock(&mutex);
+//            need_to_send_stop = 1;
+//            pthread_mutex_unlock(&mutex);
+//        }
+        pthread_mutex_lock(&mutex);
+        neighbors_sent_stop[other_node_index] = 1;
+        pthread_mutex_unlock(&mutex);
+    } else if (strncmp(msg, ASK_IF_CHILD_MESSAGE, 4) == 0) {
+        printf("Received ASK_IF_CHILD from node %d\n", other_node_id);
+        if (my_parent == other_node_id) {
+            printf("This is my parent\n");
+            send_i_am_your_kid_msg(sock_fd);
+        } else {
+            printf("This is not my parent\n");
+            send_i_am_not_your_kid_msg(sock_fd);
+        }
+    } else if (strncmp(msg, I_AM_YOUR_KID_MESSAGE, 4) == 0) {
+        pthread_mutex_lock(&mutex);
+        children[other_node_index] = 1;
+        pthread_mutex_unlock(&mutex);
+    } else if (strncmp(msg, I_AM_NOT_YOUR_KID_MESSAGE, 4) == 0) {
+        pthread_mutex_lock(&mutex);
+        children[other_node_index] = 0;
+        pthread_mutex_unlock(&mutex);
+    } else {
+        printf("Received { %s } from node %d\n", msg, other_node_id);
+    }
+}
 void *listen_to_node(void *args) {
     listen_to_node_args *f_args = (listen_to_node_args*) args;
     int sock_fd = f_args->sock_fd;
@@ -121,7 +212,7 @@ void *listen_to_node(void *args) {
         char type[4] = {0};
         if (terminate == 1) {
             printf("WAKING UP DUE TO NODE %d DISCONNECT\n", other_node_id);
-            stopped_neighbors[other_node_index] = 1;
+            neighbors_sent_stop[other_node_index] = 1;
             pthread_mutex_lock(&mutex);
             pthread_cond_signal(&conds[other_node_index]);
             pthread_mutex_unlock(&mutex);
@@ -132,9 +223,9 @@ void *listen_to_node(void *args) {
 
         ssize_t valread = recv(sock_fd, &type, 4, 0);
         if (valread == 0) {
-            printf("Node %d disconnected\n", other_node_id);
+            printf("Node %d disconnected, I am quitting\n", other_node_id);
             terminate = 1;
-            stopped_neighbors[other_node_index] = 1;
+            neighbors_sent_stop[other_node_index] = 1;
             continue;
         }
         if (strcmp(type, SYNC_MSG) == 0) {
@@ -148,6 +239,7 @@ void *listen_to_node(void *args) {
         } else if (strcmp(type, STR_MSG) == 0) {
             char* msg = rcv_str_msg(sock_fd);
             printf("Received { %s } from node %d\n", msg, other_node_id);
+            handle_str_msg(msg, sock_fd, other_node_id, other_node_index);
             free(msg);
         } else if (strcmp(type, PELEG_MESSAGE) == 0) {
             struct peleg_msg* msg = rcv_peleg_msg(sock_fd);
@@ -168,43 +260,43 @@ void *listen_to_node(void *args) {
 
             //printf("Received PELEG from node %d, highest_uid_seen: %d, longest_distance_seen: %d\n", other_node_id, msg->highest_uid_seen, msg->longest_distance_seen);
             free(msg);
-        } else if (strcmp(type, STOP_MESSAGE) == 0) {
+        } else if (strncmp(type, STOP_MESSAGE, 4) == 0) {
             printf("Received STOP from node %d\n", other_node_id);
             pthread_mutex_lock(&mutex);
-            stopped_neighbors[other_node_index] = 1;
+            neighbors_sent_stop[other_node_index] = 1;
             pthread_mutex_unlock(&mutex);
-        } else if (strcmp(type, ROLE_CALL_MESSAGE) == 0){
-            printf("Recieved ROLE from node %d\n", other_node_id);
-            role_calls_responded[other_node_index] = 1;
-            if (my_parent == other_node_id) {
-                printf("This is my parent\n");
-                send_response_msg(sock_fd, YES_MESSAGE);
-            } else {
-                printf("This is not my parent\n");
-                send_response_msg(sock_fd, NO_MESSAGE);
-            }
-            if (children[other_node_index] != 3) {
-                start_role_call = 1;
-            }
-        } else if (strcmp(type, RESPONSE_MESSAGE) == 0){
-            char* response;
-            ssize_t resp_size = recv(sock_fd, &response, 4, 0);
-            if (resp_size == 0) {
-                printf("Node disconnected without sending response????\n");
-                continue;
-            }
-            printf("Got a role call response from node %d of %s, size %zd\n", other_node_id, response, resp_size);
-            if (strcmp(response, YES_MESSAGE) == 0) {
-                printf("This is my child\n");
-                children[other_node_index] = 1;
-            } else if (strcmp(response, NO_MESSAGE) == 0) {
-                printf("This is not my child\n");
-                children[other_node_index] = 0;
-            } else {
-                printf("The world is dead\n");
-            }
+//        } else if (strcmp(type, ROLE_CALL_MESSAGE) == 0){
+//            printf("Recieved ROLE from node %d\n", other_node_id);
+//            role_calls_responded[other_node_index] = 1;
+//            if (my_parent == other_node_id) {
+//                printf("This is my parent\n");
+//                send_response_msg(sock_fd, YES_MESSAGE);
+//            } else {
+//                printf("This is not my parent\n");
+//                send_response_msg(sock_fd, NO_MESSAGE);
+//            }
+//            if (children[other_node_index] != 3) {
+//                start_role_call = 1;
+//            }
+//        } else if (strcmp(type, RESPONSE_MESSAGE) == 0){
+//            char* response;
+//            ssize_t resp_size = recv(sock_fd, &response, 4, 0);
+//            if (resp_size == 0) {
+//                printf("Node disconnected without sending response????\n");
+//                continue;
+//            }
+//            printf("Got a role call response from node %d of %s, size %zd\n", other_node_id, response, resp_size);
+//            if (strcmp(response, YES_MESSAGE) == 0) {
+//                printf("This is my child\n");
+//                children[other_node_index] = 1;
+//            } else if (strcmp(response, NO_MESSAGE) == 0) {
+//                printf("This is not my child\n");
+//                children[other_node_index] = 0;
+//            } else {
+//                printf("The world is dead\n");
+//            }
         } else {
-//            printf("Received unknown message type from node %d: %s\n", other_node_id, type);
+            printf("Received unknown message type from node %d: %s\n", other_node_id, type);
         }
     }
     return NULL;
@@ -313,15 +405,19 @@ int* start_connections(int node_id, struct node* nodes, int num_nodes){
 
     conds = (pthread_cond_t*) malloc(sizeof(pthread_cond_t) * node.num_neighbors);
     neighbor_round = (int*) malloc(sizeof(int) * node.num_neighbors);
-    stopped_neighbors = (int*) malloc(sizeof(int) * node.num_neighbors);
+    neighbors_sent_stop = (int*) malloc(sizeof(int) * node.num_neighbors);
+    neighbors_agree_elected = (int*) malloc(sizeof(int) * node.num_neighbors);
     children = (int*) malloc(sizeof(int) * node.num_neighbors);
-    role_calls_responded = (int*) malloc(sizeof(int) * node.num_neighbors);
+    neighbors_done_finding_kids = (int*) malloc(sizeof(int) * node.num_neighbors);
+//    role_calls_responded = (int*) malloc(sizeof(int) * node.num_neighbors);
 
     for (int i = 0; i < node.num_neighbors; i++) {
         neighbor_round[i] = -1;
-        children[i] = 3;
-        role_calls_responded[i] = 0;
-        stopped_neighbors[i] = 0;
+        children[i] = -1;
+//        role_calls_responded[i] = 0;
+        neighbors_sent_stop[i] = 0;
+        neighbors_agree_elected[i] = 0;
+        neighbors_done_finding_kids = 0;
         pthread_cond_init(&conds[i], NULL);
     }
     // accept connections from this node
@@ -498,26 +594,40 @@ int main(int argv, char* argc[]) {
         };
         int neighbors_finished = 0;
         int num_stopped = 0;
+        int num_agree_elected = 0;
         int neighbors_responded = 0;
+        int num_neighbors_responded_to_family = 0;
+        int num_neighbors_done_finding_kids = 0;
+
         for (int i = 0; i < node.num_neighbors; i++) {
             struct node neighbor = nodes[node_from_id(node.neighbors[i], nodes, num_nodes)];
             // wait until neighbor round >= current round
             pthread_mutex_lock(&mutex);
-            if (neighbor_round[i] < current_round && !stopped_neighbors[i] ) {
+            if (neighbor_round[i] < current_round && !neighbors_sent_stop[i] ) {
                 printf("Waiting for node %d to finish round %d, currently they are on %d\n", node.neighbors[i], current_round, neighbor_round[i]);
                 pthread_cond_wait(&conds[i], &mutex);
                 printf("Waking up from waiting for node %d\n", node.neighbors[i]);
             }
             pthread_mutex_unlock(&mutex);
-            if (children[i] != 3) {
-                neighbors_finished++;
-            }
-            if (role_calls_responded[i] == 1){
-                neighbors_responded++;
-            }
-            if (stopped_neighbors[i] == 1){
+//            if (children[i] != -1) {
+//                neighbors_finished++;
+//            }
+//            if (role_calls_responded[i] == 1){
+//                neighbors_responded++;
+//            }
+            if (neighbors_sent_stop[i] == 1){
                 num_stopped++;
             }
+
+            if(neighbors_agree_elected[i] == 1) {
+                num_agree_elected++;
+            }
+
+        }
+
+        if (num_agree_elected == node.num_neighbors) {
+            printf("Node %d has decided a leader has been elected because all neighbors agree\n", node.node_id);
+            leader_elected = 1;
         }
 
         if(last_distance_seen != my_longest_distance_seen) {
@@ -526,19 +636,27 @@ int main(int argv, char* argc[]) {
             rounds_since_update++;
         }
 
-
-        if (rounds_since_update == 3 && my_highest_uid_seen == node.node_id) {
-            start_role_call = 1;
-        }
-        if (start_role_call == 1){
-            for (int i = 0; i < node.num_neighbors; i++) {
-                if (children[i] != 3 || node.neighbors[i] == my_parent){
-                    continue;
-                }
-                send_role_msg(neighbor_fds[i]);
+        if(rounds_since_update == 3) {
+            printf("Node %d has decided a leader has been elected because rounds since update was 3\n", node.node_id);
+            for (int i = 0; i < node.num_neighbors; ++i) {
+                send_agree_elected_msg(neighbor_fds[i]);
             }
-            start_role_call = 0;
+//            terminate = 1;
         }
+
+
+//        if (rounds_since_update == 3 && my_highest_uid_seen == node.node_id) {
+//            start_role_call = 1;
+//        }
+//        if (start_role_call == 1){
+//            for (int i = 0; i < node.num_neighbors; i++) {
+//                if (children[i] != -1 || node.neighbors[i] == my_parent){
+//                    continue;
+//                }
+//                send_role_msg(neighbor_fds[i]);
+//            }
+//            start_role_call = 0;
+//        }
 
 
         if (neighbors_finished == node.num_neighbors && neighbors_responded == node.num_neighbors){
@@ -548,7 +666,9 @@ int main(int argv, char* argc[]) {
         }
 
         if (num_stopped == node.num_neighbors){
+            printf("TERMINATING Num Stopped = %d / %d for node id %d\n", num_stopped, node.num_neighbors, node.node_id);
             terminate = 1;
+
         }
 
 //        printf("Num ACK = %d\n", num_ack);
@@ -557,6 +677,61 @@ int main(int argv, char* argc[]) {
 //            terminate = 1;
 //            break;
 //        }
+
+        if(need_to_send_agree_elected == 1) {
+            //we need to send agree elected to all except the neighbor the idx of need_to_send_agree_elected
+            for (int i = 0; i < node.num_neighbors; ++i) {
+                send_agree_elected_msg(neighbor_fds[i]);
+            }
+            pthread_mutex_lock(&mutex);
+            need_to_send_agree_elected = 0;
+            already_sent_agree_elected = 1;
+            pthread_mutex_unlock(&mutex);
+        }
+
+        if(need_to_send_stop == 1) {
+            //we need to send stop to all except
+            for (int i = 0; i < node.num_neighbors; ++i) {
+                send_stop_msg(neighbor_fds[i]);
+            }
+            pthread_mutex_lock(&mutex);
+            need_to_send_stop = 0;
+            already_sent_stop = 1;
+            pthread_mutex_unlock(&mutex);
+        }
+
+        if(leader_elected == 1) {
+            //everybody knows we all found a leader, now we need to find our children
+            //only ask once!
+            if(already_asked_for_children == 0) {
+                for (int i = 0; i < node.num_neighbors; ++i) {
+                    send_ask_if_child_msg(neighbor_fds[i]);
+                }
+                already_asked_for_children = 1;
+            }
+
+            //now that we know we've asked before, count the responses.
+            for(int i = 0; i < node.num_neighbors; i++) {
+                if(children[i] != -1) {
+                    num_neighbors_responded_to_family++;
+                }
+            }
+
+            if(num_neighbors_responded_to_family == node.num_neighbors) {
+               //send stop to all neighbors
+                for (int i = 0; i < node.num_neighbors; ++i) {
+                      send_stop_msg(neighbor_fds[i]);
+                }
+            }
+            printf("A leader has been elected, have familial responses from %d / %d neighbors\n", num_neighbors_responded_to_family, node.num_neighbors);
+
+            if(num_stopped == node.num_neighbors) {
+                // All neighbors responded to us, we can now ask to stop. I think.
+                terminate = 1;
+            }
+
+        }
+
         if (terminate == 1) {
             printf("TERMINATE\n");
             break;

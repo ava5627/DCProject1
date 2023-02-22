@@ -8,17 +8,13 @@
 #include <netdb.h>
 #include <pthread.h>
 #include <semaphore.h>
-#include <semaphore.h>
 
 #define SYNC_MSG "SYNC"
 #define STR_MSG "STRM"
 #define PELEG_MESSAGE "PLGM"
-#define ROLE_CALL_MESSAGE "ROLE"
-#define RESPONSE_MESSAGE "RESP"
 #define STOP_MESSAGE "STOP"
-#define YES_MESSAGE "YESM"
-#define NO_MESSAGE "NOMM"
-#define ACK_MESSAGE "ACKM"
+#define WAIT_MESSAGE "WAIT"
+#define DONE_MESSAGE "DONE"
 
 
 struct node {
@@ -38,17 +34,14 @@ pthread_mutex_t mutex;
 pthread_cond_t* conds;
 
 int* neighbor_round;
+int* still_listening;
 int current_round;
 
 int my_highest_uid_seen;
 int my_longest_distance_seen;
 int my_parent;
 int terminate = 0;
-int start_role_call = 0;
-int* stopped_neighbors;
-int* role_calls_responded;
 
-int* children;
 
 int node_from_id(int node_id, struct node* nodes, int num_nodes) {
     for (int i = 0; i < num_nodes; i++) {
@@ -62,48 +55,41 @@ int node_from_id(int node_id, struct node* nodes, int num_nodes) {
 
 char* rcv_str_msg(int sock_fd) {
     int msg_len;
-    recv(sock_fd, &msg_len, sizeof(int), 0);
+    recv(sock_fd, &msg_len, sizeof(int), MSG_WAITALL);
     char* msg = (char*) malloc(sizeof(char) * (msg_len + 1));
-    recv(sock_fd, msg, msg_len, 0);
+    recv(sock_fd, msg, msg_len, MSG_WAITALL);
     return msg;
 }
 
 void send_str_msg(int sock_fd, char* msg) {
     int msg_len = strlen(msg);
-    send(sock_fd, STR_MSG, 4, 0);
+    send(sock_fd, STR_MSG, sizeof(STR_MSG), 0);
     send(sock_fd, &msg_len, sizeof(int), 0);
     send(sock_fd, msg, msg_len, 0);
 }
 
 struct peleg_msg* rcv_peleg_msg(int sock_fd) {
     struct peleg_msg* msg = (struct peleg_msg*) malloc(sizeof(struct peleg_msg));
-    recv(sock_fd, msg, sizeof(struct peleg_msg), 0);
+    recv(sock_fd, msg, sizeof(struct peleg_msg), MSG_WAITALL);
     return msg;
 }
 
 void send_peleg_msg(int sock_fd, int uid_data, int distance_data) {
-    send(sock_fd, PELEG_MESSAGE, 4, 0);
+    send(sock_fd, PELEG_MESSAGE, sizeof(PELEG_MESSAGE), 0);
     struct peleg_msg* msg = (struct peleg_msg*) malloc(sizeof(struct peleg_msg));
     msg->highest_uid_seen = uid_data;
     msg->longest_distance_seen = distance_data;
     send(sock_fd, msg, sizeof(msg), 0);
 }
 
-
-
 void send_stop_msg(int sock_fd) {
-    send(sock_fd, STOP_MESSAGE, sizeof(STOP_MESSAGE), 0);
+    send(sock_fd, STOP_MESSAGE, sizeof(STOP_MESSAGE), MSG_WAITALL);
 }
 
-void send_role_msg(int sock_fd) {
-    send(sock_fd, ROLE_CALL_MESSAGE, sizeof(ROLE_CALL_MESSAGE), 0);
+void send_done_msg(int sock_fd) {
+    send(sock_fd, DONE_MESSAGE, sizeof(DONE_MESSAGE), MSG_WAITALL);
 }
 
-//response value of 0 means I'm not your kid, 1 means I AM your kid
-void send_response_msg(int sock_fd, char* response_value) {
-    send(sock_fd, RESPONSE_MESSAGE, sizeof(RESPONSE_MESSAGE), 0);
-    send(sock_fd, &response_value, sizeof(response_value), 0);
-}
 
 typedef struct listen_to_node_args {
     int sock_fd;
@@ -118,36 +104,35 @@ void *listen_to_node(void *args) {
     int other_node_index = f_args->other_node_index;
 
     while (1) {
-        char type[4] = {0};
         if (terminate == 1) {
-            printf("WAKING UP DUE TO NODE %d DISCONNECT\n", other_node_id);
-            stopped_neighbors[other_node_index] = 1;
+//            printf("No longer listening to node %d\n", other_node_id);
             pthread_mutex_lock(&mutex);
+            still_listening[other_node_index] = 0;
             pthread_cond_signal(&conds[other_node_index]);
             pthread_mutex_unlock(&mutex);
-            close(sock_fd);
             break;
         }
 
 
-        ssize_t valread = recv(sock_fd, &type, 4, 0);
-        if (valread == 0) {
-            printf("Node %d disconnected\n", other_node_id);
+        char type[5];
+        ssize_t val_read = recv(sock_fd, &type, sizeof(STR_MSG), MSG_WAITALL);
+
+        if (val_read == 0) {
+//            printf("Node %d disconnected\n", other_node_id);
             terminate = 1;
-            stopped_neighbors[other_node_index] = 1;
             continue;
         }
         if (strcmp(type, SYNC_MSG) == 0) {
             int round;
-            recv(sock_fd, &round, sizeof(int), 0);
-            printf("Received SYNC from node %d, round %d\n", other_node_id, round);
+            recv(sock_fd, &round, sizeof(int), MSG_WAITALL);
+//            printf("Received SYNC from node %d, round %d\n", other_node_id, round);
             pthread_mutex_lock(&mutex);
             pthread_cond_signal(&conds[other_node_index]);
             neighbor_round[other_node_index] = round;
             pthread_mutex_unlock(&mutex);
         } else if (strcmp(type, STR_MSG) == 0) {
             char* msg = rcv_str_msg(sock_fd);
-            printf("Received { %s } from node %d\n", msg, other_node_id);
+//            printf("Received { %s } from node %d\n", msg, other_node_id);
             free(msg);
         } else if (strcmp(type, PELEG_MESSAGE) == 0) {
             struct peleg_msg* msg = rcv_peleg_msg(sock_fd);
@@ -169,13 +154,15 @@ void *listen_to_node(void *args) {
             //printf("Received PELEG from node %d, highest_uid_seen: %d, longest_distance_seen: %d\n", other_node_id, msg->highest_uid_seen, msg->longest_distance_seen);
             free(msg);
         } else if (strcmp(type, STOP_MESSAGE) == 0) {
-            printf("Received STOP from node %d\n", other_node_id);
+//            printf("Received STOP from node %d\n", other_node_id);
             pthread_mutex_lock(&mutex);
-            stopped_neighbors[other_node_index] = 1;
             terminate = 1;
             pthread_mutex_unlock(&mutex);
+        } else if (strcmp(type, WAIT_MESSAGE) == 0) {
+            printf("SHOULD NOT RECEIVE WAIT MESSAGE\n");
+            exit(1);
         } else {
-//            printf("Received unknown message type from node %d: %s\n", other_node_id, type);
+            printf("Received unknown message type from node %d: %s\n", other_node_id, type);
         }
     }
     return NULL;
@@ -227,7 +214,7 @@ int* accept_nodes(struct node this_node) {
         recv(client_fd, &recv_node_id, sizeof(int), 0);
         for (int j = 0; j < this_node.num_neighbors; j++) {
             if (this_node.neighbors[j] == recv_node_id) {
-                printf("Connected to node %d should be %d \n", recv_node_id, this_node.neighbors[j]);
+//                printf("Connected to node %d should be %d \n", recv_node_id, this_node.neighbors[j]);
                 neighbor_fds[j] = client_fd;
                 break;
             }
@@ -284,15 +271,11 @@ int* start_connections(int node_id, struct node* nodes, int num_nodes){
 
     conds = (pthread_cond_t*) malloc(sizeof(pthread_cond_t) * node.num_neighbors);
     neighbor_round = (int*) malloc(sizeof(int) * node.num_neighbors);
-    stopped_neighbors = (int*) malloc(sizeof(int) * node.num_neighbors);
-    children = (int*) malloc(sizeof(int) * node.num_neighbors);
-    role_calls_responded = (int*) malloc(sizeof(int) * node.num_neighbors);
+    still_listening = (int*) malloc(sizeof(int) * node.num_neighbors);
 
     for (int i = 0; i < node.num_neighbors; i++) {
         neighbor_round[i] = -1;
-        children[i] = 3;
-        role_calls_responded[i] = 0;
-        stopped_neighbors[i] = 0;
+        still_listening[i] = 1;
         pthread_cond_init(&conds[i], NULL);
     }
     // accept connections from this node
@@ -337,7 +320,7 @@ int main(int argv, char* argc[]) {
     printf("Node id: %d\n", node_id);
 
     // Read from config file
-    printf("Reading from config file\n");
+//    printf("Reading from config file\n");
     char *config_file = argc[2];
 
     FILE *fp = fopen(config_file, "r");
@@ -360,7 +343,7 @@ int main(int argv, char* argc[]) {
         num_nodes = atoi(line);
         break;
     }
-    printf("Number of nodes: %d\n", num_nodes);
+//    printf("Number of nodes: %d\n", num_nodes);
     // First line is the number of nodes
     // next lines are the node ids, ip addresses, and ports
     // space separated, ip address are strings of arbitrary length
@@ -458,24 +441,23 @@ int main(int argv, char* argc[]) {
         last_distance_seen = my_longest_distance_seen;
 
         for (int i = 0; i < node.num_neighbors; i++) {
-            send(neighbor_fds[i], SYNC_MSG, 4, 0);
-            send(neighbor_fds[i], &current_round, 4, 0);
+            send(neighbor_fds[i], SYNC_MSG, sizeof(SYNC_MSG), 0);
+            send(neighbor_fds[i], &current_round, sizeof(int), 0);
             send_peleg_msg(neighbor_fds[i], my_highest_uid_seen, my_longest_distance_seen);
         };
         int neighbors_finished = 0;
-        int num_stopped = 0;
         int neighbors_responded = 0;
         for (int i = 0; i < node.num_neighbors; i++) {
+            if (terminate) {
+                break;
+            }
             pthread_mutex_lock(&mutex);
-            if (neighbor_round[i] < current_round && !stopped_neighbors[i] ) {
+            if (neighbor_round[i] < current_round) {
                 printf("Waiting for node %d to finish round %d, currently they are on %d\n", node.neighbors[i], current_round, neighbor_round[i]);
                 pthread_cond_wait(&conds[i], &mutex);
                 printf("Waking up from waiting for node %d\n", node.neighbors[i]);
             }
             pthread_mutex_unlock(&mutex);
-            if (stopped_neighbors[i] == 1){
-                num_stopped++;
-            }
         }
 
         if(last_distance_seen != my_longest_distance_seen) {
@@ -498,8 +480,85 @@ int main(int argv, char* argc[]) {
         }
 
     }
+
+    int* neighbor_done = (int*)malloc(node.num_neighbors * sizeof(int));
+    for (int i = 0; i < node.num_neighbors; i++) {
+        neighbor_done[i] = 0;
+    }
+
     printf("The leader id %d\n", my_highest_uid_seen);
     printf("I am %d, my parent is %d\n", node.node_id, my_parent);
+    for (int i = 0; i < node.num_neighbors; i++) {
+        send_stop_msg(neighbor_fds[i]);
+        ssize_t bytes = send(neighbor_fds[i], WAIT_MESSAGE, sizeof(WAIT_MESSAGE), 0);
+        if (bytes < 0) {
+            printf("Error sending wait message to %d\n", node.neighbors[i]);
+            exit(1);
+        }
+        int is_child = 0;
+        if (node.neighbors[i] == my_parent) {
+            is_child = 1;
+        }
+        send(neighbor_fds[i], &is_child, sizeof(int), 0);
+//        printf("Sent wait message to %d, is_child is %d\n", node.neighbors[i], is_child);
+    }
+    printf("Waiting for children\n");
+    int* is_child = (int*)malloc(num_nodes * sizeof(int));
+    for (int i = 0; i < node.num_neighbors; i++) {
+//        printf("Waiting for node %d to finish\n", node.neighbors[i]);
+        if (still_listening[i] == 1) {
+//            printf("Still listening to %d\n", node.neighbors[i]);
+            pthread_mutex_lock(&mutex);
+            pthread_cond_wait(&conds[i], &mutex);
+            pthread_mutex_unlock(&mutex);
+        }
+        char* wait_msg = (char*)malloc(sizeof(WAIT_MESSAGE));
+        while (strcmp(wait_msg, WAIT_MESSAGE) != 0) {
+            char wait_character = 'W';
+            recv(neighbor_fds[i], &wait_character, sizeof(char), 0);
+            for (int j = 1; j < sizeof(WAIT_MESSAGE); j++) {
+                wait_msg[j-1] = wait_msg[j];
+            }
+            wait_msg[sizeof(WAIT_MESSAGE)-1] = wait_character;
+            if (strcmp(wait_msg, DONE_MESSAGE) == 0) {
+                neighbor_done[i] = 1;
+//                printf("Node %d is done\n", node.neighbors[i]);
+            }
+//            printf("Received %s from %d\n", wait_msg, node.neighbors[i]);
+        }
+//        printf("Received wait message from %d\n", node.neighbors[i]);
+        int child = 0;
+        recv(neighbor_fds[i], &child, sizeof(int), 0);
+        is_child[i] = child;
+        fflush(stdout);
+    }
+    printf("My children are: ");
+    int degreee = 0;
+    for (int i = 0; i < node.num_neighbors; i++) {
+        if (is_child[i] == 1) {
+            printf("%d ", node.neighbors[i]);
+            degreee++;
+        }
+    }
+    printf("\n");
+    printf("Degree is %d\n", degreee);
+    printf("Done\n");
+    for (int i = 0; i < node.num_neighbors; i++) {
+        if (is_child[i] == 1) {
+            send_stop_msg(neighbor_fds[i]);
+        }
+    }
+
+    ssize_t bytes = 1;
+    for (int i = 0; i < node.num_neighbors; i++) {
+        send_done_msg(neighbor_fds[i]);
+        if (neighbor_done[i] == 0) {
+            char* done_msg = (char*)malloc(sizeof(DONE_MESSAGE));
+            while (strcmp(done_msg, DONE_MESSAGE) != 0) {
+                recv(neighbor_fds[i], done_msg, sizeof(DONE_MESSAGE), MSG_WAITALL);
+            }
+        }
+    }
     fflush(stdout);
 
     for (int i = 0; i < num_nodes; i++) {
